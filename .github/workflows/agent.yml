@@ -1,0 +1,134 @@
+name: Agent
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task for the agent to execute"
+        required: true
+        type: string
+      issue_number:
+        description: "Optional issue number to comment back on (default 0)"
+        required: false
+        default: "0"
+        type: string
+
+jobs:
+  run:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && github.event.label.name == 'agent')
+    runs-on: [self-hosted, agent]
+    timeout-minutes: 45
+    concurrency:
+      group: agent-${{ github.event_name }}-${{ github.event.issue.number || github.run_id }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    env:
+      AGENT_TRUSTED_USERS: ${{ vars.AGENT_TRUSTED_USERS || github.repository_owner }}
+      AGENT_MAX_CHANGED_FILES: ${{ vars.AGENT_MAX_CHANGED_FILES || '20' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard issue trigger
+        if: github.event_name == 'issues'
+        id: guard
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          event_path = os.environ["GITHUB_EVENT_PATH"]
+          with open(event_path, "r", encoding="utf-8") as fh:
+              event = json.load(fh)
+
+          sender = ((event.get("sender") or {}).get("login") or "").strip().lower()
+          issue = event.get("issue") or {}
+          body = issue.get("body") or ""
+
+          trusted_raw = os.environ.get("AGENT_TRUSTED_USERS", "")
+          trusted = {
+              user.strip().lower()
+              for user in trusted_raw.split(",")
+              if user.strip()
+          }
+
+          sender_allowed = sender in trusted
+          armed = "RUN_AGENT: YES" in body.upper()
+          allow_run = sender_allowed and armed
+
+          reasons = []
+          if not sender_allowed:
+              reasons.append(
+                  f"trigger user '@{sender or 'unknown'}' is not in AGENT_TRUSTED_USERS"
+              )
+          if not armed:
+              reasons.append("missing required trigger phrase 'RUN_AGENT: YES' in issue body")
+
+          skip_reason = "; ".join(reasons)
+          print(f"allow_run={'true' if allow_run else 'false'}")
+          print(f"skip_reason={skip_reason.replace(chr(10), ' ').replace(chr(13), ' ')}")
+          PY
+
+      - name: Comment when issue trigger is skipped
+        if: github.event_name == 'issues' && steps.guard.outputs.allow_run != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          REASON="${{ steps.guard.outputs.skip_reason }}"
+          if [[ -z "$REASON" ]]; then
+            REASON="request did not pass safety checks."
+          fi
+          COMMENT="Agent run skipped: ${REASON}
+
+          To run the agent:
+          1. Add label 'agent' (already done)
+          2. Include this exact phrase in the issue body: RUN_AGENT: YES
+          3. Trigger from a trusted GitHub user."
+          PAYLOAD="$(COMMENT_BODY="$COMMENT" python3 - <<'PY'
+          import json, os
+          print(json.dumps({"body": os.environ.get("COMMENT_BODY", "")}))
+          PY
+          )"
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}/comments" \
+            -d "$PAYLOAD" >/dev/null
+
+      - name: Build task file from issue
+        if: github.event_name == 'issues' && steps.guard.outputs.allow_run == 'true'
+        shell: bash
+        run: |
+          mkdir -p .agent
+          printf "TITLE: %s\n\n%s\n" "${{ github.event.issue.title }}" "${{ github.event.issue.body }}" > .agent/task.txt
+          echo "${{ github.event.issue.number }}" > .agent/issue_number.txt
+
+      - name: Manual dispatch task file
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          mkdir -p .agent
+          printf "TITLE: Manual run\n\n%s\n" "${{ inputs.task }}" > .agent/task.txt
+          echo "${{ inputs.issue_number }}" > .agent/issue_number.txt
+
+      - name: Run agent
+        if: github.event_name == 'workflow_dispatch' || steps.guard.outputs.allow_run == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENT_MAX_CHANGED_FILES: ${{ env.AGENT_MAX_CHANGED_FILES }}
+        shell: bash
+        run: |
+          chmod +x scripts/agent/run.sh
+          scripts/agent/run.sh .agent/task.txt .agent/issue_number.txt

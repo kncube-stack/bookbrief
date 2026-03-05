@@ -1,0 +1,43 @@
+name: Agent Task
+description: Request a code change from the automation agent
+title: "Agent task: "
+labels:
+  - agent
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to request a repo edit from your phone.
+        Safety trigger is required: include `RUN_AGENT: YES`.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should the agent change?
+      placeholder: Update the login subtitle text...
+    validations:
+      required: true
+  - type: textarea
+    id: rules
+    attributes:
+      label: Rules
+      description: What must not change?
+      placeholder: Do not change layout, colors, or auth logic.
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks
+      description: What should be tested before opening PR?
+      placeholder: App loads, login works, no console errors.
+    validations:
+      required: true
+  - type: input
+    id: run_agent
+    attributes:
+      label: Safety Trigger
+      description: "Type exactly RUN_AGENT: YES to allow the agent run."
+      value: "RUN_AGENT: YES"
+    validations:
+      required: true
